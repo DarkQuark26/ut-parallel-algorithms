@@ -199,7 +199,63 @@ public class LatticeLinearPredicateFramework {
 
 // ============= Algorithm Implementations =============
 
-class StableMarriageAlgorithm implements LatticeLinearPredicateFramework.LLPAlgorithm {
+// Has to be outside of LatticeLinearPredicateFramework otherwise get some obscure error.
+// I don't know, I'm not an OOP guy haha
+// Wow does Java have a metric ton of ways to create "this thing must implmenet these methods"
+// This class is motivated by the potential edge case of hasConverged returning true when it should 
+// return false due to a value being mutated while hasConverged is scanning G.
+abstract class ConvergenceCheckerLLPAlgorithm implements LatticeLinearPredicateFramework.LLPAlgorithm {
+    private static final int CONVERGENCE_CHECK_COUNT = 5;
+    private static final int CONVERGENCE_CHECK_DELAY_MS = 5;
+
+    /**
+     * Checks if the algorithm has converged on a single snapshot of the global state.
+     * This is the core algorithm-specific convergence predicate.
+     * 
+     * @param G The global state.
+     * @return true if converged, false otherwise.
+     */
+    //protected abstract boolean isLocallyConverged(LatticeLinearPredicateFramework.GlobalState G);
+    protected boolean isLocallyConverged(LatticeLinearPredicateFramework.GlobalState G) {
+        for (int j = 0; j < G.size(); j++) {
+            LatticeLinearPredicateFramework.ThreadContext ctx = 
+                new LatticeLinearPredicateFramework.ThreadContext(j, G);
+            if (forbidden(ctx)) {
+                return false; // Found a forbidden state
+            }
+        }
+        return true; // No forbidden states found
+    }
+
+    @Override
+    public boolean hasConverged(LatticeLinearPredicateFramework.GlobalState G) {
+        // Check multiple times over a short period to avoid issue of global state
+        // potentially being mutated while it is being scanned
+        
+        for (int i = 0; i < CONVERGENCE_CHECK_COUNT; i++) {
+            if (!isLocallyConverged(G)) {
+                return false;
+            }
+            try {
+                // Wait a short time to allow other threads to potentially advance/mutate the state
+                Thread.sleep(CONVERGENCE_CHECK_DELAY_MS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        return true;
+    }
+    
+
+}
+
+// Initially done as implements LLPAlgorithm, but need for multiple convergence checks
+// Prompeted switching to terribly named ConvergenceCheckerLLPAlgorithm
+// Does technically leave room for edge cases.
+// Using a data structure that supports lock-free modification, but has the ability to
+// be frozen might be useful, but this solution is decent enough.
+class StableMarriageAlgorithm extends ConvergenceCheckerLLPAlgorithm {
     private final int[][] mpref;
     private final int[][] rank;
     private final int[][] I;
@@ -253,16 +309,21 @@ class StableMarriageAlgorithm implements LatticeLinearPredicateFramework.LLPAlgo
     }
 }
 
-class ScanAlgorithm implements LatticeLinearPredicateFramework.LLPAlgorithm {
+class ScanAlgorithm extends ConvergenceCheckerLLPAlgorithm {
     private final int[] A;
     private final int[] S;
 
     public ScanAlgorithm(int[] A) {
         this.A = A;
         int n = A.length;
-        this.S = new int[n - 1];
-        for (int i = 0; i < n - 1; i++) {
-            S[i] = A[2 * i + 1] + (2 * i + 2 < n ? A[2 * i + 2] : 0);
+        this.S = new int[n];
+        
+        // Build S safely - only compute for valid indices
+        for (int i = 0; i < n; i++) {
+            int leftChild = 2 * i + 1;
+            int rightChild = 2 * i + 2;
+            S[i] = (leftChild < n ? A[leftChild] : 0) + 
+                   (rightChild < n ? A[rightChild] : 0);
         }
     }
 
@@ -286,15 +347,23 @@ class ScanAlgorithm implements LatticeLinearPredicateFramework.LLPAlgorithm {
         int Gj = state.get(j);
         int n = A.length;
 
+        // Check bounds before every array access
         if (j == 1 && Gj < 0) return true;
-        if (j % 2 == 0 && j / 2 < state.size()) {
-            if (Gj < state.get(j / 2)) return true;
+        
+        if (j % 2 == 0) {
+            int parentIndex = j / 2;
+            if (parentIndex < state.size() && Gj < state.get(parentIndex)) 
+                return true;
         }
-        if (j % 2 == 1 && j < n && j / 2 < state.size() && j - 1 < S.length) {
-            if (Gj < S[j - 1] + state.get(j / 2)) return true;
-        }
-        if (j % 2 == 1 && j >= n && j / 2 < state.size() && j - n < A.length) {
-            if (Gj < A[j - n] + state.get(j / 2)) return true;
+        
+        if (j % 2 == 1) {
+            int parentIndex = j / 2;
+            if (parentIndex < state.size()) {
+                if (j < n && j - 1 < S.length && Gj < S[j - 1] + state.get(parentIndex)) 
+                    return true;
+                if (j >= n && j - n < A.length && Gj < A[j - n] + state.get(parentIndex)) 
+                    return true;
+            }
         }
 
         return false;
@@ -309,21 +378,44 @@ class ScanAlgorithm implements LatticeLinearPredicateFramework.LLPAlgorithm {
         int newValue = Integer.MIN_VALUE;
 
         if (j == 1) newValue = Math.max(newValue, 0);
-        if (j % 2 == 0 && j / 2 < state.size()) {
-            newValue = Math.max(newValue, state.get(j / 2));
+        
+        if (j % 2 == 0) {
+            int parentIndex = j / 2;
+            if (parentIndex < state.size()) {
+                newValue = Math.max(newValue, state.get(parentIndex));
+            }
         }
-        if (j % 2 == 1 && j < n && j / 2 < state.size() && j - 1 < S.length) {
-            newValue = Math.max(newValue, S[j - 1] + state.get(j / 2));
-        }
-        if (j % 2 == 1 && j >= n && j / 2 < state.size() && j - n < A.length) {
-            newValue = Math.max(newValue, A[j - n] + state.get(j / 2));
+        
+        if (j % 2 == 1) {
+            int parentIndex = j / 2;
+            if (parentIndex < state.size()) {
+                if (j < n && j - 1 < S.length) {
+                    newValue = Math.max(newValue, S[j - 1] + state.get(parentIndex));
+                }
+                if (j >= n && j - n < A.length) {
+                    newValue = Math.max(newValue, A[j - n] + state.get(parentIndex));
+                }
+            }
         }
 
         state.set(j, newValue);
     }
+
+    @Override
+    protected boolean isLocallyConverged(LatticeLinearPredicateFramework.GlobalState G) {
+        for (int j = 0; j < G.size(); j++) {
+            LatticeLinearPredicateFramework.ThreadContext ctx = 
+                new LatticeLinearPredicateFramework.ThreadContext(j, G);
+            if (forbidden(ctx)) {
+                return false; // Found a forbidden state
+            }
+        }
+        return true; // No forbidden states found
+    }
 }
 
-class FastComponentsAlgorithm implements LatticeLinearPredicateFramework.LLPAlgorithm {
+
+class FastComponentsAlgorithm extends ConvergenceCheckerLLPAlgorithm {
     private final List<Integer>[] adj;
 
     @SuppressWarnings("unchecked")
@@ -376,7 +468,7 @@ class FastComponentsAlgorithm implements LatticeLinearPredicateFramework.LLPAlgo
     }
 }
 
-class BellmanFordAlgorithm implements LatticeLinearPredicateFramework.LLPAlgorithm {
+class BellmanFordAlgorithm extends ConvergenceCheckerLLPAlgorithm {
     private final List<Integer>[] pre;
     private final double[][] w;
     private final int source;
@@ -429,7 +521,7 @@ class BellmanFordAlgorithm implements LatticeLinearPredicateFramework.LLPAlgorit
     }
 }
 
-class JohnsonAlgorithm implements LatticeLinearPredicateFramework.LLPAlgorithm {
+class JohnsonAlgorithm extends ConvergenceCheckerLLPAlgorithm {//implements LatticeLinearPredicateFramework.LLPAlgorithm {
     private final List<Integer>[] pre;
     private final int[][] w;
 
@@ -855,32 +947,32 @@ class LLPBenchmark {
         System.out.println("COMPREHENSIVE LLP ALGORITHM BENCHMARK");
         System.out.println("=".repeat(80));
 
-        int[] sizes = {10, 50, 100, 500};
+        int[] sizes = {10, 50, 100, 500, 10000};
         int[] threadCounts = {1, 2, 4, 8};
         long timeout = 30; // seconds
 
         // Stable Marriage Benchmarks
-        System.out.println("\n" + "=".repeat(80));
-        System.out.println("STABLE MARRIAGE BENCHMARKS");
-        System.out.println("=".repeat(80));
-        for (int size : sizes) {
-            for (int threads : threadCounts) {
-                if (threads <= size) {
-                    runStableMarriageBenchmark(size, threads, timeout);
-                }
-            }
-        }
+        //System.out.println("\n" + "=".repeat(80));
+        //System.out.println("STABLE MARRIAGE BENCHMARKS");
+        //System.out.println("=".repeat(80));
+        //for (int size : sizes) {
+        //    for (int threads : threadCounts) {
+        //        if (threads <= size) {
+        //            runStableMarriageBenchmark(size, threads, timeout);
+        //        }
+        //    }
+        //}
 
         // Scan Benchmarks (use powers of 2)
-        System.out.println("\n" + "=".repeat(80));
-        System.out.println("SCAN BENCHMARKS");
-        System.out.println("=".repeat(80));
-        int[] scanSizes = {16, 64, 256, 1024};
-        for (int size : scanSizes) {
-            for (int threads : threadCounts) {
-                runScanBenchmark(size, threads, timeout);
-            }
-        }
+        //System.out.println("\n" + "=".repeat(80));
+        //System.out.println("SCAN BENCHMARKS");
+        //System.out.println("=".repeat(80));
+        //int[] scanSizes = {16, 64, 256, 1024};
+        //for (int size : scanSizes) {
+        //    for (int threads : threadCounts) {
+        //        runScanBenchmark(size, threads, timeout);
+        //    }
+        //}
 
         // Connected Components Benchmarks
         System.out.println("\n" + "=".repeat(80));
