@@ -1,7 +1,5 @@
 package hw.hw4;
 
-import java.util.concurrent.atomic.AtomicIntegerArray;
-
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
@@ -47,7 +45,12 @@ class GlobalState {
     public int size() {
         return n;
     }
-
+    /**
+     * 
+     * @return snapshot, a view of G as a int[] at the time this was run
+     * May not be current due to other threads updating the array while
+     * traversing, so be careful reading too much into it
+     */
     public int[] snapshot() {
         int[] snapshot = new int[n];
         for (int i = 0; i < n; i++) {
@@ -57,6 +60,9 @@ class GlobalState {
     }
 }
 
+/**
+ * Class the controls specific element in G
+ */
 class ThreadContext {
     public final int j;
     public final GlobalState G;
@@ -68,7 +74,12 @@ class ThreadContext {
 }
 
 public interface LLPAlgorithm {
-    // Add ensure for alternative to orbidden and advance?
+    // Add ensure for alternative to forbidden and advance?
+    /**
+     * Initializers a thread in the default state
+     * 
+     * @param ctx
+     */
     void init(ThreadContext ctx);
 
     /**
@@ -98,37 +109,103 @@ public interface LLPAlgorithm {
 
 class LLPRunner {
     private final int n; // Number of elements in global state
-    private final GlobalState G; //
-    private final LLPAlgorithm algorithm;
-    
     private final int numPlatformThreads; // Number of platform threads to use
+    private final GlobalState G; // Global state
+    private final LLPAlgorithm algorithm; // Algorithm for particular problem
+    private final ExecutorService executor; // Manages threads
+    private final AtomicBoolean running; // Flag for all platform threads to check state of algorithm
+    private final AtomicInteger activeThreads; // Counter for number of active threads
+    private final CountDownLatch initLatch; // Used 
+    //private final AtomicIntegerArray forbiddenFlags; // Use to track which elements are currrently forbidden, termination behavior
     
     
     public LLPRunner(int n, LLPAlgorithm algorithm) {
         this(n, algorithm, Runtime.getRuntime().availableProcessors());
     }
 
+    public LLPRunner(int n, LLPAlgorithm algorithm, int numPlatformThreads) {
+        this.n = n;
+        this.numPlatformThreads = Math.min(numPlatformThreads, n);
+        this.G = new GlobalState(n);
+        this.algorithm = algorithm;
+        this.executor = Executors.newFixedThreadPool(this.numPlatformThreads);
+        this.running = new AtomicBoolean(false);
+        this.activeThreads = new AtomicInteger(0);
+        this.initLatch = new CountDownLatch(n);
+    }
 
     public void start() {
         // Initalize logical threads (to be used by platofrm threads)
-        for (int j = 0; j < n; j++) {
+        for (int j = 0; j < n; j++) { // Not parallel since assume runtime
             final int threadID = j;
             ThreadContext ctx = new ThreadContext(threadID, G);
             algorithm.init(ctx);
-            initLatch.countDown();
-        }
-
-        // Populate work queue
-        for (int j = 0; j < n; j++) {
-            workQueue.offer(j)
+            initLatch.countDown(); // Add in case want to parallelize further later
         }
 
         // Start platform threads
         for (int p = 0; p < numPlatformThreads; p++) {
-            runner.submit(this::platformThreadLoop)
+            final int platformThreadId = p;
+            executor.submit(() -> platformThreadLoop(platformThreadId));
         }
+    }
+
+    public void stop() {
+        running.set(false);
+        executor.shutdown();
+    }
+
+    public boolean awaitConvergence(long timeout, TimeUnit unit) throws InterruptedException {
+        long deadline = System.nanoTime() + unit.toNanos(timeout);
+        while (running.get() && System.nanoTime() < deadline) {
+            if (algorithm.hasConverged(G)) {
+                stop();
+                return true;
+            }
+            Thread.sleep(10);
+        }
+        return algorithm.hasConverged(G);
+    }
+
+    public GlobalState getGlobalState() {
+        return G;
+    }
+
+    private void platformThreadLoop(int platformThreadId) {
+        activeThreads.incrementAndGet();
+
+        try {
+            initLatch.await(); // Waits for thread initialization to complete
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            activeThreads.decrementAndGet();
+            return;
+        }
+        
+        // Uses strided execution, i.e thread j runs G[j], G[j+numPlatformThreads], G[j+2*numPlatformThreads], etc.
+        while (running.get()) {
+            for (int j = platformThreadId; j < n; j += numPlatformThreads) {
+                ThreadContext ctx = new ThreadContext(j ,G);
+
+                if (algorithm.forbidden(ctx)) {
+                    int newValue = algorithm.advance(ctx);
+                    G.set(j ,newValue);
+                }
+            }
+            Thread.yield(); // Just in case number of platform threads is larger than number of physical
+        }
+        activeThreads.decrementAndGet();
     }
 
 }
 
 }
+
+/*
+ * Stable Marriage Problem
+ * Parallel Prefix problem
+ * Finding connected components of an undirected graph (Fast Algorithm)
+ * Bellman-Ford Algorithm
+ * Johnson’s algorithm for shortest path
+ * Boruvka’s Algorithm
+ */
