@@ -190,7 +190,7 @@ public class LatticeLinearPredicateFramework {
                         algorithm.advance(ctx);
                     }
                 }
-                Thread.yield();
+                //Thread.yield();
             }
             activeThreads.decrementAndGet();
         }
@@ -930,7 +930,7 @@ class BoruvkaAlgorithm extends ConvergenceCheckerLLPAlgorithm {
             (LatticeLinearPredicateFramework.IntArrayState) ctx.G;
         int j = ctx.j;
         
-        // advance(j) ≡ G[j] := G[G[j]] (path compression)
+        // advance(j) def G[j] := G[G[j]]
         state.set(j, state.get(state.get(j)));
     }
     
@@ -1413,6 +1413,38 @@ class LLPBenchmark {
         System.out.println(result);
     }
 
+    public void runBoruvkaBenchmark(int n, double edgeProbability, int numThreads, long timeoutSeconds) {
+        System.out.println("\n=== Benchmarking Boruvka MSF (n=" + n + ", threads=" + numThreads + ") ===");
+        
+        List<BoruvkaAlgorithm.Edge>[] adjList = generator.generateConnectedBoruvkaGraph(n);
+        BoruvkaAlgorithm algo = new BoruvkaAlgorithm(adjList, n);
+        
+        long startTime = System.currentTimeMillis();
+        LatticeLinearPredicateFramework.LLPRunner runner = 
+            new LatticeLinearPredicateFramework.LLPRunner(n, algo, numThreads);
+        runner.start();
+        
+        boolean converged = false;
+        try {
+            converged = runner.awaitConvergence(timeoutSeconds, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        
+        runner.stop();
+        long executionTime = System.currentTimeMillis() - startTime;
+        
+        // Get MSF edges
+        Set<BoruvkaAlgorithm.Edge> msfEdges = algo.getMSFEdges();
+        System.out.println("MSF has " + msfEdges.size() + " edges");
+        
+        BenchmarkResult result = new BenchmarkResult(
+            "Boruvka", n, numThreads, executionTime, converged);
+        results.add(result);
+        System.out.println(result);
+    }
+
+
     public void runComprehensiveBenchmark() {
         System.out.println("\n" + "=".repeat(80));
         System.out.println("COMPREHENSIVE LLP ALGORITHM BENCHMARK");
@@ -1477,6 +1509,18 @@ class LLPBenchmark {
             for (int threads : threadCounts) {
                 if (threads <= size) {
                     runJohnsonBenchmark(size, 4, threads, timeout);
+                }
+            }
+        }
+
+        // Boruvka Benchmarks
+        System.out.println("\n" + "=".repeat(80));
+        System.out.println("BORUVKA MSF BENCHMARKS");
+        System.out.println("=".repeat(80));
+        for (int size : sizes) {
+            for (int threads : threadCounts) {
+                if (threads <= size) {
+                    runBoruvkaBenchmark(size, 0.2, threads, timeout);
                 }
             }
         }
