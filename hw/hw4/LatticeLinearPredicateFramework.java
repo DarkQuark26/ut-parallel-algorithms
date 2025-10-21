@@ -307,7 +307,6 @@ class StableMarriageAlgorithm extends ConvergenceCheckerLLPAlgorithm {
     }
 }
 
-// Eventuall delete... //!!!!!!!!!!
 class ScanAlgorithm extends ConvergenceCheckerLLPAlgorithm {
     private final int[] A;
     private final int[] S;
@@ -963,6 +962,7 @@ class BoruvkaAlgorithm extends ConvergenceCheckerLLPAlgorithm {
 }
 
 // ============= Test Case Generators =============
+// Beware! Lots of AI generated code below.
 
 class TestCaseGenerator {
     private final Random random;
@@ -1226,14 +1226,18 @@ class LLPBenchmark {
         public final int numThreads;
         public final long executionTimeMs;
         public final boolean converged;
+        public final String inputFile;
+        public final String outputFile;
 
         public BenchmarkResult(String algorithmName, int problemSize, int numThreads, 
-                             long executionTimeMs, boolean converged) {
+                             long executionTimeMs, boolean converged, String inputFile, String outputFile) {
             this.algorithmName = algorithmName;
             this.problemSize = problemSize;
             this.numThreads = numThreads;
             this.executionTimeMs = executionTimeMs;
             this.converged = converged;
+            this.inputFile = inputFile;
+            this.outputFile = outputFile;
         }
 
         @Override
@@ -1245,16 +1249,56 @@ class LLPBenchmark {
 
     private final TestCaseGenerator generator;
     private final List<BenchmarkResult> results;
+    private final String outputDir;
+    private int runCounter;
 
     public LLPBenchmark(long seed) {
+        this(seed, "benchmark_output");
+    }
+
+    public LLPBenchmark(long seed, String outputDir) {
         this.generator = new TestCaseGenerator(seed);
         this.results = new ArrayList<>();
+        this.outputDir = outputDir;
+        this.runCounter = 0;
+        
+        // Create output directory
+        new java.io.File(outputDir).mkdirs();
     }
 
     public void runStableMarriageBenchmark(int n, int numThreads, long timeoutSeconds) {
         System.out.println("\n=== Benchmarking Stable Marriage (n=" + n + ", threads=" + numThreads + ") ===");
         
+        String runId = String.format("stablemarriage_n%d_t%d_r%d", n, numThreads, runCounter++);
+        String inputFile = outputDir + "/" + runId + "_input.txt";
+        String outputFile = outputDir + "/" + runId + "_output.txt";
+        
         TestCaseGenerator.StableMarriageInstance instance = generator.generateStableMarriage(n);
+        
+        // Write input to file
+        try (java.io.PrintWriter writer = new java.io.PrintWriter(inputFile)) {
+            writer.println("Stable Marriage Problem");
+            writer.println("n = " + n);
+            writer.println("\nMen's Preferences:");
+            for (int i = 0; i < n; i++) {
+                writer.print("Man " + i + ": ");
+                for (int j = 0; j < n; j++) {
+                    writer.print(instance.mpref[i][j] + " ");
+                }
+                writer.println();
+            }
+            writer.println("\nWomen's Rank Matrix:");
+            for (int i = 0; i < n; i++) {
+                writer.print("Woman " + i + ": ");
+                for (int j = 0; j < n; j++) {
+                    writer.print(instance.rank[i][j] + " ");
+                }
+                writer.println();
+            }
+        } catch (Exception e) {
+            System.err.println("Error writing input file: " + e.getMessage());
+        }
+        
         StableMarriageAlgorithm algo = new StableMarriageAlgorithm(
             instance.mpref, instance.rank, instance.I);
         
@@ -1273,8 +1317,26 @@ class LLPBenchmark {
         runner.stop();
         long executionTime = System.currentTimeMillis() - startTime;
         
+        // Write output to file
+        try (java.io.PrintWriter writer = new java.io.PrintWriter(outputFile)) {
+            writer.println("Stable Marriage Results");
+            writer.println("Execution Time: " + executionTime + " ms");
+            writer.println("Converged: " + converged);
+            writer.println("Threads: " + numThreads);
+            writer.println("\nFinal Matching (Man -> Woman):");
+            
+            LatticeLinearPredicateFramework.IntArrayState state = 
+                (LatticeLinearPredicateFramework.IntArrayState) runner.getGlobalState();
+            int[] finalState = state.snapshot();
+            for (int i = 0; i < n; i++) {
+                writer.println("Man " + i + " -> Woman " + finalState[i]);
+            }
+        } catch (Exception e) {
+            System.err.println("Error writing output file: " + e.getMessage());
+        }
+        
         BenchmarkResult result = new BenchmarkResult(
-            "StableMarriage", n, numThreads, executionTime, converged);
+            "StableMarriage", n, numThreads, executionTime, converged, inputFile, outputFile);
         results.add(result);
         System.out.println(result);
     }
@@ -1282,7 +1344,26 @@ class LLPBenchmark {
     public void runScanBenchmark(int n, int numThreads, long timeoutSeconds) {
         System.out.println("\n=== Benchmarking Scan (n=" + n + ", threads=" + numThreads + ") ===");
         
+        String runId = String.format("scan_n%d_t%d_r%d", n, numThreads, runCounter++);
+        String inputFile = outputDir + "/" + runId + "_input.txt";
+        String outputFile = outputDir + "/" + runId + "_output.txt";
+        
         int[] A = generator.generateScanInput(n);
+        
+        // Write input to file
+        try (java.io.PrintWriter writer = new java.io.PrintWriter(inputFile)) {
+            writer.println("Scan Problem");
+            writer.println("n = " + n);
+            writer.println("\nInput Array:");
+            for (int i = 0; i < n; i++) {
+                writer.print(A[i] + " ");
+                if ((i + 1) % 20 == 0) writer.println();
+            }
+            writer.println();
+        } catch (Exception e) {
+            System.err.println("Error writing input file: " + e.getMessage());
+        }
+        
         ScanAlgorithm algo = new ScanAlgorithm(A);
         
         long startTime = System.currentTimeMillis();
@@ -1300,8 +1381,26 @@ class LLPBenchmark {
         runner.stop();
         long executionTime = System.currentTimeMillis() - startTime;
         
+        // Write output to file
+        try (java.io.PrintWriter writer = new java.io.PrintWriter(outputFile)) {
+            writer.println("Scan Results");
+            writer.println("Execution Time: " + executionTime + " ms");
+            writer.println("Converged: " + converged);
+            writer.println("Threads: " + numThreads);
+            writer.println("\nPrefix Sums:");
+            
+            LatticeLinearPredicateFramework.IntArrayState state = 
+                (LatticeLinearPredicateFramework.IntArrayState) runner.getGlobalState();
+            int[] finalState = state.snapshot();
+            for (int i = n; i < 2 * n - 1; i++) {
+                writer.println("Position " + (i - n) + ": " + finalState[i]);
+            }
+        } catch (Exception e) {
+            System.err.println("Error writing output file: " + e.getMessage());
+        }
+        
         BenchmarkResult result = new BenchmarkResult(
-            "Scan", n, numThreads, executionTime, converged);
+            "Scan", n, numThreads, executionTime, converged, inputFile, outputFile);
         results.add(result);
         System.out.println(result);
     }
@@ -1309,7 +1408,32 @@ class LLPBenchmark {
     public void runComponentsBenchmark(int n, double edgeProb, int numThreads, long timeoutSeconds) {
         System.out.println("\n=== Benchmarking Connected Components (n=" + n + ", threads=" + numThreads + ") ===");
         
+        String runId = String.format("components_n%d_t%d_r%d", n, numThreads, runCounter++);
+        String inputFile = outputDir + "/" + runId + "_input.txt";
+        String outputFile = outputDir + "/" + runId + "_output.txt";
+        
         List<Integer>[] adj = generator.generateRandomGraph(n, edgeProb);
+        
+        // Write input to file
+        try (java.io.PrintWriter writer = new java.io.PrintWriter(inputFile)) {
+            writer.println("Connected Components Problem");
+            writer.println("n = " + n);
+            writer.println("Edge Probability = " + edgeProb);
+            writer.println("\nAdjacency Lists:");
+            int edgeCount = 0;
+            for (int i = 0; i < n; i++) {
+                writer.print("Vertex " + i + ": ");
+                for (int neighbor : adj[i]) {
+                    writer.print(neighbor + " ");
+                    if (neighbor > i) edgeCount++;
+                }
+                writer.println();
+            }
+            writer.println("Total Edges: " + edgeCount);
+        } catch (Exception e) {
+            System.err.println("Error writing input file: " + e.getMessage());
+        }
+        
         FastComponentsAlgorithm algo = new FastComponentsAlgorithm(adj);
         
         long startTime = System.currentTimeMillis();
@@ -1327,8 +1451,39 @@ class LLPBenchmark {
         runner.stop();
         long executionTime = System.currentTimeMillis() - startTime;
         
+        // Write output to file
+        try (java.io.PrintWriter writer = new java.io.PrintWriter(outputFile)) {
+            writer.println("Connected Components Results");
+            writer.println("Execution Time: " + executionTime + " ms");
+            writer.println("Converged: " + converged);
+            writer.println("Threads: " + numThreads);
+            writer.println("\nComponent Assignment:");
+            
+            LatticeLinearPredicateFramework.IntArrayState state = 
+                (LatticeLinearPredicateFramework.IntArrayState) runner.getGlobalState();
+            int[] finalState = state.snapshot();
+            
+            Map<Integer, List<Integer>> components = new HashMap<>();
+            for (int i = 0; i < n; i++) {
+                int root = finalState[i];
+                components.computeIfAbsent(root, k -> new ArrayList<>()).add(i);
+            }
+            
+            writer.println("Number of Components: " + components.size());
+            int compId = 0;
+            for (Map.Entry<Integer, List<Integer>> entry : components.entrySet()) {
+                writer.print("Component " + compId++ + " (root=" + entry.getKey() + "): ");
+                for (int v : entry.getValue()) {
+                    writer.print(v + " ");
+                }
+                writer.println();
+            }
+        } catch (Exception e) {
+            System.err.println("Error writing output file: " + e.getMessage());
+        }
+        
         BenchmarkResult result = new BenchmarkResult(
-            "FastComponents", n, numThreads, executionTime, converged);
+            "FastComponents", n, numThreads, executionTime, converged, inputFile, outputFile);
         results.add(result);
         System.out.println(result);
     }
@@ -1336,7 +1491,29 @@ class LLPBenchmark {
     public void runBellmanFordBenchmark(int n, int avgDegree, int numThreads, long timeoutSeconds) {
         System.out.println("\n=== Benchmarking Bellman-Ford (n=" + n + ", threads=" + numThreads + ") ===");
         
+        String runId = String.format("bellmanford_n%d_t%d_r%d", n, numThreads, runCounter++);
+        String inputFile = outputDir + "/" + runId + "_input.txt";
+        String outputFile = outputDir + "/" + runId + "_output.txt";
+        
         TestCaseGenerator.GraphInstance graph = generator.generateBellmanFordGraph(n, avgDegree);
+        
+        // Write input to file
+        try (java.io.PrintWriter writer = new java.io.PrintWriter(inputFile)) {
+            writer.println("Bellman-Ford Problem");
+            writer.println("n = " + n);
+            writer.println("Source = 0");
+            writer.println("\nEdges (u -> v, weight):");
+            int edgeCount = 0;
+            for (int i = 0; i < n; i++) {
+                for (int j : graph.adj[i]) {
+                    writer.printf("%d -> %d, weight: %.2f%n", i, j, graph.weights[i][j]);
+                    edgeCount++;
+                }
+            }
+            writer.println("Total Edges: " + edgeCount);
+        } catch (Exception e) {
+            System.err.println("Error writing input file: " + e.getMessage());
+        }
         
         // Convert to predecessor lists
         @SuppressWarnings("unchecked")
@@ -1367,8 +1544,26 @@ class LLPBenchmark {
         runner.stop();
         long executionTime = System.currentTimeMillis() - startTime;
         
+        // Write output to file
+        try (java.io.PrintWriter writer = new java.io.PrintWriter(outputFile)) {
+            writer.println("Bellman-Ford Results");
+            writer.println("Execution Time: " + executionTime + " ms");
+            writer.println("Converged: " + converged);
+            writer.println("Threads: " + numThreads);
+            writer.println("\nShortest Distances from Source 0:");
+            
+            LatticeLinearPredicateFramework.DoubleArrayState state = 
+                (LatticeLinearPredicateFramework.DoubleArrayState) runner.getGlobalState();
+            double[] finalState = state.snapshot();
+            for (int i = 0; i < n; i++) {
+                writer.printf("Vertex %d: %.2f%n", i, finalState[i]);
+            }
+        } catch (Exception e) {
+            System.err.println("Error writing output file: " + e.getMessage());
+        }
+        
         BenchmarkResult result = new BenchmarkResult(
-            "BellmanFord", n, numThreads, executionTime, converged);
+            "BellmanFord", n, numThreads, executionTime, converged, inputFile, outputFile);
         results.add(result);
         System.out.println(result);
     }
@@ -1376,7 +1571,32 @@ class LLPBenchmark {
     public void runJohnsonBenchmark(int n, int avgDegree, int numThreads, long timeoutSeconds) {
         System.out.println("\n=== Benchmarking Johnson (n=" + n + ", threads=" + numThreads + ") ===");
         
+        String runId = String.format("johnson_n%d_t%d_r%d", n, numThreads, runCounter++);
+        String inputFile = outputDir + "/" + runId + "_input.txt";
+        String outputFile = outputDir + "/" + runId + "_output.txt";
+        
         TestCaseGenerator.GraphInstance graph = generator.generateJohnsonGraph(n, avgDegree);
+        
+        // Write input to file
+        try (java.io.PrintWriter writer = new java.io.PrintWriter(inputFile)) {
+            writer.println("Johnson Problem");
+            writer.println("n = " + n);
+            writer.println("\nPredecessor Lists and Weights:");
+            
+            @SuppressWarnings("unchecked")
+            List<Integer>[] pre = (List<Integer>[]) graph.adj;
+            int edgeCount = 0;
+            for (int j = 0; j < n; j++) {
+                writer.println("Vertex " + j + " predecessors:");
+                for (int i : pre[j]) {
+                    writer.printf("  %d -> %d, weight: %.0f%n", i, j, graph.weights[i][j]);
+                    edgeCount++;
+                }
+            }
+            writer.println("Total Edges: " + edgeCount);
+        } catch (Exception e) {
+            System.err.println("Error writing input file: " + e.getMessage());
+        }
         
         // Graph already has predecessor format from generator
         @SuppressWarnings("unchecked")
@@ -1407,8 +1627,26 @@ class LLPBenchmark {
         runner.stop();
         long executionTime = System.currentTimeMillis() - startTime;
         
+        // Write output to file
+        try (java.io.PrintWriter writer = new java.io.PrintWriter(outputFile)) {
+            writer.println("Johnson Results");
+            writer.println("Execution Time: " + executionTime + " ms");
+            writer.println("Converged: " + converged);
+            writer.println("Threads: " + numThreads);
+            writer.println("\nMinimum Price Vector:");
+            
+            LatticeLinearPredicateFramework.IntArrayState state = 
+                (LatticeLinearPredicateFramework.IntArrayState) runner.getGlobalState();
+            int[] finalState = state.snapshot();
+            for (int i = 0; i < n; i++) {
+                writer.println("Vertex " + i + ": " + finalState[i]);
+            }
+        } catch (Exception e) {
+            System.err.println("Error writing output file: " + e.getMessage());
+        }
+        
         BenchmarkResult result = new BenchmarkResult(
-            "Johnson", n, numThreads, executionTime, converged);
+            "Johnson", n, numThreads, executionTime, converged, inputFile, outputFile);
         results.add(result);
         System.out.println(result);
     }
@@ -1416,7 +1654,34 @@ class LLPBenchmark {
     public void runBoruvkaBenchmark(int n, double edgeProbability, int numThreads, long timeoutSeconds) {
         System.out.println("\n=== Benchmarking Boruvka MSF (n=" + n + ", threads=" + numThreads + ") ===");
         
+        String runId = String.format("boruvka_n%d_t%d_r%d", n, numThreads, runCounter++);
+        String inputFile = outputDir + "/" + runId + "_input.txt";
+        String outputFile = outputDir + "/" + runId + "_output.txt";
+        
         List<BoruvkaAlgorithm.Edge>[] adjList = generator.generateConnectedBoruvkaGraph(n);
+        
+        // Write input to file
+        try (java.io.PrintWriter writer = new java.io.PrintWriter(inputFile)) {
+            writer.println("Boruvka MSF Problem");
+            writer.println("n = " + n);
+            writer.println("\nEdges:");
+            Set<String> printedEdges = new HashSet<>();
+            int edgeCount = 0;
+            for (int i = 0; i < n; i++) {
+                for (BoruvkaAlgorithm.Edge e : adjList[i]) {
+                    String edgeKey = Math.min(e.u, e.v) + "-" + Math.max(e.u, e.v);
+                    if (!printedEdges.contains(edgeKey)) {
+                        writer.printf("(%d, %d) weight: %.2f%n", e.u, e.v, e.weight);
+                        printedEdges.add(edgeKey);
+                        edgeCount++;
+                    }
+                }
+            }
+            writer.println("Total Edges: " + edgeCount);
+        } catch (Exception e) {
+            System.err.println("Error writing input file: " + e.getMessage());
+        }
+        
         BoruvkaAlgorithm algo = new BoruvkaAlgorithm(adjList, n);
         
         long startTime = System.currentTimeMillis();
@@ -1436,13 +1701,57 @@ class LLPBenchmark {
         
         // Get MSF edges
         Set<BoruvkaAlgorithm.Edge> msfEdges = algo.getMSFEdges();
+        
+        // Write output to file
+        try (java.io.PrintWriter writer = new java.io.PrintWriter(outputFile)) {
+            writer.println("Boruvka MSF Results");
+            writer.println("Execution Time: " + executionTime + " ms");
+            writer.println("Converged: " + converged);
+            writer.println("Threads: " + numThreads);
+            writer.println("\nMinimum Spanning Forest:");
+            writer.println("Number of edges: " + msfEdges.size());
+            
+            double totalWeight = 0;
+            for (BoruvkaAlgorithm.Edge e : msfEdges) {
+                writer.printf("(%d, %d) weight: %.2f%n", e.u, e.v, e.weight);
+                totalWeight += e.weight;
+            }
+            writer.printf("Total MSF Weight: %.2f%n", totalWeight);
+            
+            // Component information
+            writer.println("\nFinal Component Structure:");
+            LatticeLinearPredicateFramework.IntArrayState state = 
+                (LatticeLinearPredicateFramework.IntArrayState) runner.getGlobalState();
+            int[] finalState = state.snapshot();
+            
+            Map<Integer, List<Integer>> components = new HashMap<>();
+            for (int i = 0; i < n; i++) {
+                int root = finalState[i];
+                components.computeIfAbsent(root, k -> new ArrayList<>()).add(i);
+            }
+            
+            writer.println("Number of Components: " + components.size());
+            int compId = 0;
+            for (Map.Entry<Integer, List<Integer>> entry : components.entrySet()) {
+                writer.print("Component " + compId++ + " (root=" + entry.getKey() + "): ");
+                for (int v : entry.getValue()) {
+                    writer.print(v + " ");
+                }
+                writer.println();
+            }
+        } catch (Exception e) {
+            System.err.println("Error writing output file: " + e.getMessage());
+        }
+        
         System.out.println("MSF has " + msfEdges.size() + " edges");
         
         BenchmarkResult result = new BenchmarkResult(
-            "Boruvka", n, numThreads, executionTime, converged);
+            "Boruvka", n, numThreads, executionTime, converged, inputFile, outputFile);
         results.add(result);
         System.out.println(result);
     }
+
+
 
 
     public void runComprehensiveBenchmark() {
@@ -1452,7 +1761,7 @@ class LLPBenchmark {
 
         int[] sizes = {10, 50, 100, 500, 10000};
         int[] threadCounts = {1, 2, 4, 8};
-        long timeout = 30; // seconds
+        long timeout = 60; // seconds
 
         // Stable Marriage Benchmarks
         //System.out.println("\n" + "=".repeat(80));
@@ -1467,63 +1776,63 @@ class LLPBenchmark {
         //}
 
         // Scan Benchmarks (use powers of 2)
+        System.out.println("\n" + "=".repeat(80));
+        System.out.println("SCAN BENCHMARKS");
+        System.out.println("=".repeat(80));
+        int[] scanSizes = {16, 64, 1024, 4096, 8192};
+        for (int size : scanSizes) {
+            for (int threads : threadCounts) {
+                runScanBenchmark(size, threads, timeout);
+            }
+        }
+
+        // Connected Components Benchmarks
         //System.out.println("\n" + "=".repeat(80));
-        //System.out.println("SCAN BENCHMARKS");
+        //System.out.println("CONNECTED COMPONENTS BENCHMARKS");
         //System.out.println("=".repeat(80));
-        //int[] scanSizes = {16, 64, 256, 1024};
-        //for (int size : scanSizes) {
+        //for (int size : sizes) {
         //    for (int threads : threadCounts) {
-        //        runScanBenchmark(size, threads, timeout);
+        //        if (threads <= size) {
+        //            runComponentsBenchmark(size, 0.1, threads, timeout);
+        //        }
         //    }
         //}
 
-        // Connected Components Benchmarks
-        System.out.println("\n" + "=".repeat(80));
-        System.out.println("CONNECTED COMPONENTS BENCHMARKS");
-        System.out.println("=".repeat(80));
-        for (int size : sizes) {
-            for (int threads : threadCounts) {
-                if (threads <= size) {
-                    runComponentsBenchmark(size, 0.1, threads, timeout);
-                }
-            }
-        }
-
         // Bellman-Ford Benchmarks
-        System.out.println("\n" + "=".repeat(80));
-        System.out.println("BELLMAN-FORD BENCHMARKS");
-        System.out.println("=".repeat(80));
-        for (int size : sizes) {
-            for (int threads : threadCounts) {
-                if (threads <= size) {
-                    runBellmanFordBenchmark(size, 4, threads, timeout);
-                }
-            }
-        }
+        //System.out.println("\n" + "=".repeat(80));
+        //System.out.println("BELLMAN-FORD BENCHMARKS");
+        //System.out.println("=".repeat(80));
+        //for (int size : sizes) {
+        //    for (int threads : threadCounts) {
+        //        if (threads <= size) {
+        //            runBellmanFordBenchmark(size, 4, threads, timeout);
+        //        }
+        //    }
+        //}
 
         // Johnson Benchmarks
-        System.out.println("\n" + "=".repeat(80));
-        System.out.println("JOHNSON BENCHMARKS");
-        System.out.println("=".repeat(80));
-        for (int size : sizes) {
-            for (int threads : threadCounts) {
-                if (threads <= size) {
-                    runJohnsonBenchmark(size, 4, threads, timeout);
-                }
-            }
-        }
+        //System.out.println("\n" + "=".repeat(80));
+        //System.out.println("JOHNSON BENCHMARKS");
+        //System.out.println("=".repeat(80));
+        //for (int size : sizes) {
+        //    for (int threads : threadCounts) {
+        //        if (threads <= size) {
+        //            runJohnsonBenchmark(size, 4, threads, timeout);
+        //        }
+        //    }
+        //}
 
         // Boruvka Benchmarks
-        System.out.println("\n" + "=".repeat(80));
-        System.out.println("BORUVKA MSF BENCHMARKS");
-        System.out.println("=".repeat(80));
-        for (int size : sizes) {
-            for (int threads : threadCounts) {
-                if (threads <= size) {
-                    runBoruvkaBenchmark(size, 0.2, threads, timeout);
-                }
-            }
-        }
+        //System.out.println("\n" + "=".repeat(80));
+        //System.out.println("BORUVKA MSF BENCHMARKS");
+        //System.out.println("=".repeat(80));
+        //for (int size : sizes) {
+        //    for (int threads : threadCounts) {
+        //        if (threads <= size) {
+        //            runBoruvkaBenchmark(size, 0.2, threads, timeout);
+        //        }
+        //    }
+        //}
 
         printSummary();
     }
@@ -1644,7 +1953,7 @@ class LLPBenchmarkRunner {
         benchmark.runBellmanFordBenchmark(100, 8, 4, 30);
         
         // Custom Johnson test
-        benchmark.runJohnsonBenchmark(100, 6, 4, 30);
+        benchmark.runJohnsonBenchmark(100, 6, 4, 60);
         
         benchmark.printSummary();
         benchmark.exportToCSV("custom_benchmark_results.csv");
