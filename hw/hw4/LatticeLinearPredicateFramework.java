@@ -246,8 +246,6 @@ abstract class ConvergenceCheckerLLPAlgorithm implements LatticeLinearPredicateF
         }
         return true;
     }
-    
-
 }
 
 // Initially done as implements LLPAlgorithm, but need for multiple convergence checks
@@ -309,6 +307,7 @@ class StableMarriageAlgorithm extends ConvergenceCheckerLLPAlgorithm {
     }
 }
 
+// Eventuall delete... //!!!!!!!!!!
 class ScanAlgorithm extends ConvergenceCheckerLLPAlgorithm {
     private final int[] A;
     private final int[] S;
@@ -414,6 +413,250 @@ class ScanAlgorithm extends ConvergenceCheckerLLPAlgorithm {
     }
 }
 
+
+class LLPReduce extends ConvergenceCheckerLLPAlgorithm {
+    private final int[] A;
+    private final int n_A; // This is 'n' from the pseudo-code
+
+    public LLPReduce(int[] A) {
+        this.A = A;
+        this.n_A = A.length;
+    }
+
+    @Override
+    public LatticeLinearPredicateFramework.GlobalState createGlobalState(int n) {
+        // n here is the size of the state G, which is n_A - 1
+        return new LatticeLinearPredicateFramework.IntArrayState(n);
+    }
+
+    @Override
+    public void init(LatticeLinearPredicateFramework.ThreadContext ctx) {
+        LatticeLinearPredicateFramework.IntArrayState G = (LatticeLinearPredicateFramework.IntArrayState) ctx.G;
+        G.set(ctx.j, Integer.MIN_VALUE); // -inf
+    }
+
+    @Override
+    public boolean forbidden(LatticeLinearPredicateFramework.ThreadContext ctx) {
+        LatticeLinearPredicateFramework.IntArrayState G = (LatticeLinearPredicateFramework.IntArrayState) ctx.G;
+        int j = ctx.j;       // 0-based Java index
+        int j_p = j + 1;   // 1-based pseudo-code index
+        int g_j = G.get(j);
+
+        // Clause 2: G[j] >= A[2j - n + 1] + A[2j - n + 2] if n/2 <= j < n
+        // These are the "leaf-parents" in the reduction tree.
+        if (j_p >= n_A / 2) {
+            // Convert pseudo-code A[k] to Java A[k-1]
+            int a_idx_1 = (2 * j_p - n_A + 1) - 1; // 2*j_p - n_A
+            int a_idx_2 = (2 * j_p - n_A + 2) - 1; // 2*j_p - n_A + 1
+            
+            // Check for potential overflow before adding
+            long sum = (long)A[a_idx_1] + A[a_idx_2];
+            if (sum > Integer.MAX_VALUE) {
+                 return g_j < Integer.MAX_VALUE; // or handle overflow appropriately
+            }
+            if (sum < Integer.MIN_VALUE) {
+                return g_j < Integer.MIN_VALUE;
+            }
+
+            return g_j < (int)sum;
+        }
+        // Clause 1: G[j] >= G[2j] + G[2j + 1] if 1 <= j < n/2
+        // These are the internal nodes.
+        else {
+            // Convert pseudo-code G[k] to Java G[k-1]
+            int left_child_j = (2 * j_p) - 1;
+            int right_child_j = (2 * j_p + 1) - 1; // 2 * j_p
+
+            int g_left = G.get(left_child_j);
+            int g_right = G.get(right_child_j);
+
+            // Dependency check: wait for children to be computed
+            if (g_left == Integer.MIN_VALUE || g_right == Integer.MIN_VALUE) {
+                return false; // Not forbidden, dependencies not met
+            }
+            
+            // Check for potential overflow
+            long sum = (long)g_left + g_right;
+            if (sum > Integer.MAX_VALUE) {
+                return g_j < Integer.MAX_VALUE;
+            }
+            if (sum < Integer.MIN_VALUE) {
+                return g_j < Integer.MIN_VALUE;
+            }
+
+            return g_j < (int)sum;
+        }
+    }
+
+    @Override
+    public void advance(LatticeLinearPredicateFramework.ThreadContext ctx) {
+        LatticeLinearPredicateFramework.IntArrayState G = (LatticeLinearPredicateFramework.IntArrayState) ctx.G;
+        int j = ctx.j;
+        int j_p = j + 1;
+
+        // Clause 2 (Leaf-parents)
+        if (j_p >= n_A / 2) {
+            int a_idx_1 = 2 * j_p - n_A;
+            int a_idx_2 = 2 * j_p - n_A + 1;
+            
+            long sum = (long)A[a_idx_1] + A[a_idx_2];
+            int val = (int)Math.max(Integer.MIN_VALUE, Math.min(Integer.MAX_VALUE, sum));
+            G.set(j, val);
+        }
+        // Clause 1 (Internal nodes)
+        else {
+            int left_child_j = (2 * j_p) - 1;
+            int right_child_j = (2 * j_p);
+
+            int g_left = G.get(left_child_j);
+            int g_right = G.get(right_child_j);
+            
+            // This advance should only be called if forbidden was true,
+            // meaning children were not MIN_VALUE.
+            long sum = (long)g_left + g_right;
+            int val = (int)Math.max(Integer.MIN_VALUE, Math.min(Integer.MAX_VALUE, sum));
+            G.set(j, val);
+        }
+    }
+}
+
+class LLPScan extends ConvergenceCheckerLLPAlgorithm {
+    private final int[] A;
+    private final int[] S; // Summation tree from LLPReduce
+    private final int n_A; // This is 'n' from the pseudo-code
+
+    /**
+     * @param A The original input array (size n)
+     * @param S The summation tree from LLPReduce (size n-1)
+     */
+    public LLPScan(int[] A, int[] S) {
+        this.A = A;
+        this.S = S;
+        this.n_A = A.length;
+    }
+
+    @Override
+    public LatticeLinearPredicateFramework.GlobalState createGlobalState(int n) {
+        // n here is the size of state G, which is 2*n_A - 1
+        return new LatticeLinearPredicateFramework.IntArrayState(n);
+    }
+
+    @Override
+    public void init(LatticeLinearPredicateFramework.ThreadContext ctx) {
+        LatticeLinearPredicateFramework.IntArrayState G = (LatticeLinearPredicateFramework.IntArrayState) ctx.G;
+        G.set(ctx.j, Integer.MIN_VALUE); // -inf
+    }
+
+    @Override
+    public boolean forbidden(LatticeLinearPredicateFramework.ThreadContext ctx) {
+        LatticeLinearPredicateFramework.IntArrayState G = (LatticeLinearPredicateFramework.IntArrayState) ctx.G;
+        int j = ctx.j;       // 0-based Java index
+        int j_p = j + 1;   // 1-based pseudo-code index
+        int g_j = G.get(j);
+
+        // Clause 1: G[j] >= 0 if j = 1
+        if (j == 0) { // j_p == 1
+            return g_j < 0;
+        }
+
+        // Parent pseudo-index: j_p / 2
+        // Parent Java index: (j_p / 2) - 1  ==>  ((j + 1) / 2) - 1
+        int parent_j = ((j + 1) / 2) - 1;
+        int g_parent = G.get(parent_j);
+
+        if (g_parent == Integer.MIN_VALUE) {
+            return false;
+        }
+
+        // Clause 2: G[j] >= G[j/2] if j is even (Left child)
+        if (j_p % 2 == 0) { // j_p is even, so j is odd
+            return g_j < g_parent;
+        }
+        
+        // j_p must be odd (j is even)
+        
+        // Clause 3: G[j] >= S[j - 1] + G[j/2] if j is odd and j < n
+        if (j_p < n_A) { // Internal right child
+            // S_pseudo[k] -> S_java[k-1]
+            // We need S_pseudo[j_p - 1]
+            int s_idx = (j_p - 1) - 1; // j - 1
+            
+            // S array from LLPReduce might be shorter if n=1
+            if (s_idx < 0 || s_idx >= S.length) {
+                 // This case should ideally not be hit if j_p > 1 and j_p < n_A (implies n_A > 2)
+                 // But as a safeguard:
+                 return g_j < g_parent; // S[j-1] is effectively 0
+            }
+            
+            int s_val = S[s_idx];
+            
+            long sum = (long)s_val + g_parent;
+            if (sum > Integer.MAX_VALUE) return g_j < Integer.MAX_VALUE;
+            if (sum < Integer.MIN_VALUE) return g_j < Integer.MIN_VALUE;
+
+            return g_j < (int)sum;
+        }
+        // Clause 4: G[j] >= A[j - n] + G[j/2] if j is odd and j > n
+        else { // j_p >= n_A (Leaf node). Since j_p is odd, j_p > n_A (as n_A is power of 2)
+               // Note: pseudo-code says j > n, which is correct as n is even.
+            
+            // A_pseudo[k] -> A_java[k-1]
+            // We need A_pseudo[j_p - n_A]
+            int a_idx = (j_p - n_A) - 1; // (j+1 - n_A) - 1 = j - n_A
+            int a_val = A[a_idx];
+            
+            long sum = (long)a_val + g_parent;
+            if (sum > Integer.MAX_VALUE) return g_j < Integer.MAX_VALUE;
+            if (sum < Integer.MIN_VALUE) return g_j < Integer.MIN_VALUE;
+
+            return g_j < (int)sum;
+        }
+    }
+
+    @Override
+    public void advance(LatticeLinearPredicateFramework.ThreadContext ctx) {
+        LatticeLinearPredicateFramework.IntArrayState G = (LatticeLinearPredicateFramework.IntArrayState) ctx.G;
+        int j = ctx.j;
+        int j_p = j + 1;
+
+        // Clause 1
+        if (j == 0) {
+            G.set(0, 0);
+            return;
+        }
+
+        // Parent value (must be computed if forbidden was true)
+        int parent_j = ((j + 1) / 2) - 1;
+        int g_parent = G.get(parent_j);
+
+        // Clause 2 (Left child)
+        if (j_p % 2 == 0) {
+            G.set(j, g_parent);
+            return;
+        }
+
+        // j_p must be odd (j is even)
+
+        // Clause 3 (Internal right child)
+        if (j_p < n_A) {
+            int s_idx = j - 1; // (j_p - 1) - 1
+            int s_val = S[s_idx];
+            
+            long sum = (long)s_val + g_parent;
+            int val = (int)Math.max(Integer.MIN_VALUE, Math.min(Integer.MAX_VALUE, sum));
+            G.set(j, val);
+        }
+        // Clause 4 (Leaf right child)
+        else {
+            int a_idx = j - n_A; // (j_p - n_A) - 1
+            int a_val = A[a_idx];
+            
+            long sum = (long)a_val + g_parent;
+            int val = (int)Math.max(Integer.MIN_VALUE, Math.min(Integer.MAX_VALUE, sum));
+            G.set(j, val);
+        }
+    }
+}
 
 class FastComponentsAlgorithm extends ConvergenceCheckerLLPAlgorithm {
     private final List<Integer>[] adj;
@@ -524,10 +767,12 @@ class BellmanFordAlgorithm extends ConvergenceCheckerLLPAlgorithm {
 class JohnsonAlgorithm extends ConvergenceCheckerLLPAlgorithm {//implements LatticeLinearPredicateFramework.LLPAlgorithm {
     private final List<Integer>[] pre;
     private final int[][] w;
+    private int tempMax;
 
     public JohnsonAlgorithm(List<Integer>[] pre, int[][] w) {
         this.pre = pre;
         this.w = w;
+        this.tempMax = Integer.MIN_VALUE;
     }
 
     @Override
@@ -549,10 +794,16 @@ class JohnsonAlgorithm extends ConvergenceCheckerLLPAlgorithm {//implements Latt
         int j = ctx.j;
         int pj = state.get(j);
 
+        tempMax = Integer.MIN_VALUE;
+
+        // Calculate the max here and not in advance otherwise risk issues with 
+        // values being mutated
         for (int i : pre[j]) {
-            if (pj < state.get(i) - w[i][j]) {
-                return true;
-            }
+            tempMax = Math.max(tempMax, pj - w[i][j]);
+        }
+
+        if (pj < tempMax) {
+            return true;
         }
         return false;
     }
@@ -562,13 +813,152 @@ class JohnsonAlgorithm extends ConvergenceCheckerLLPAlgorithm {//implements Latt
         LatticeLinearPredicateFramework.IntArrayState state = 
             (LatticeLinearPredicateFramework.IntArrayState) ctx.G;
         int j = ctx.j;
-        int maxPrice = Integer.MIN_VALUE;
 
-        for (int i : pre[j]) {
-            maxPrice = Math.max(maxPrice, state.get(i) - w[i][j]);
+        state.set(j, tempMax);
+    }
+}
+
+class BoruvkaAlgorithm extends ConvergenceCheckerLLPAlgorithm {
+    public static class Edge {
+        public final int u;
+        public final int v;
+        public final double weight;
+        
+        public Edge(int u, int v, double weight) {
+            this.u = u;
+            this.v = v;
+            this.weight = weight;
         }
-
-        state.set(j, maxPrice);
+        
+        @Override
+        public String toString() {
+            return "(" + u + "," + v + "," + weight + ")";
+        }
+    }
+    
+    private final List<Edge>[] adjList;
+    private final int n;
+    private final Set<Edge> msfEdges;
+    
+    @SuppressWarnings("unchecked")
+    public BoruvkaAlgorithm(List<Edge>[] adjList, int n) {
+        this.adjList = adjList;
+        this.n = n;
+        this.msfEdges = ConcurrentHashMap.newKeySet();
+    }
+    
+    @Override
+    public LatticeLinearPredicateFramework.GlobalState createGlobalState(int n) {
+        return new LatticeLinearPredicateFramework.IntArrayState(n);
+    }
+    
+    // Find minimum weight edge from vertex v
+    private Edge findMinWeightEdge(int v, LatticeLinearPredicateFramework.IntArrayState state) {
+        Edge minEdge = null;
+        double minWeight = Double.POSITIVE_INFINITY;
+        
+        for (Edge e : adjList[v]) {
+            int neighbor = (e.u == v) ? e.v : e.u;
+            // Only consider edges to different components
+            if (state.get(v) != state.get(neighbor) && e.weight < minWeight) {
+                minWeight = e.weight;
+                minEdge = e;
+            }
+        }
+        
+        return minEdge;
+    }
+    
+    @Override
+    public void init(LatticeLinearPredicateFramework.ThreadContext ctx) {
+        LatticeLinearPredicateFramework.IntArrayState state = 
+            (LatticeLinearPredicateFramework.IntArrayState) ctx.G;
+        int v = ctx.j;
+        
+        // Find minimum weight edge from v
+        Edge mweV = findMinWeightEdge(v, state);
+        
+        if (mweV == null) {
+            // No outgoing edges, v is its own parent
+            state.set(v, v);
+            return;
+        }
+        
+        int w = (mweV.u == v) ? mweV.v : mweV.u;
+        
+        // Find minimum weight edge from w
+        Edge mweW = findMinWeightEdge(w, state);
+        
+        int parent = 0;
+        if (mweW != null && edgesEqual(mweV, mweW)) {
+            // Break symmetry: if both vertices choose each other, lower index becomes parent
+            parent = w;
+        } else if (mweV.equals(mweW) && v < w) {
+            parent = v;
+        } else {
+            parent = w;
+        }
+        
+        state.set(v, parent);
+        
+        // Add edge to MSF (avoid duplicates by ensuring u < v)
+        int edgeU = Math.min(v, w);
+        int edgeV = Math.max(v, w);
+        msfEdges.add(new Edge(edgeU, edgeV, mweV.weight));
+    }
+    
+    private boolean edgesEqual(Edge e1, Edge e2) {
+        if (e1 == null || e2 == null) return false;
+        return (e1.u == e2.u && e1.v == e2.v) || (e1.u == e2.v && e1.v == e2.u);
+    }
+    
+    @Override
+    public boolean forbidden(LatticeLinearPredicateFramework.ThreadContext ctx) {
+        LatticeLinearPredicateFramework.IntArrayState state = 
+            (LatticeLinearPredicateFramework.IntArrayState) ctx.G;
+        int j = ctx.j;
+        int Gj = state.get(j);
+        int GGj = state.get(Gj);
+        
+        // forbidden(j) ≡ G[j] != G[G[j]]
+        return Gj != GGj;
+    }
+    
+    @Override
+    public void advance(LatticeLinearPredicateFramework.ThreadContext ctx) {
+        LatticeLinearPredicateFramework.IntArrayState state = 
+            (LatticeLinearPredicateFramework.IntArrayState) ctx.G;
+        int j = ctx.j;
+        
+        // advance(j) ≡ G[j] := G[G[j]] (path compression)
+        state.set(j, state.get(state.get(j)));
+    }
+    
+    public Set<Edge> getMSFEdges() {
+        return new HashSet<>(msfEdges);
+    }
+    
+    // Verify MSF correctness
+    public boolean verifyMSF() {
+        // Check connectivity within components
+        LatticeLinearPredicateFramework.IntArrayState finalState = 
+            (LatticeLinearPredicateFramework.IntArrayState) createGlobalState(n);
+        
+        // Simple verification: check that we have n - numComponents edges
+        // where numComponents is the number of distinct roots
+        Set<Integer> roots = new HashSet<>();
+        for (int i = 0; i < n; i++) {
+            int root = i;
+            Set<Integer> visited = new HashSet<>();
+            while (root != finalState.get(root) && !visited.contains(root)) {
+                visited.add(root);
+                root = finalState.get(root);
+            }
+            roots.add(root);
+        }
+        
+        int expectedEdges = n - roots.size();
+        return msfEdges.size() <= expectedEdges;
     }
 }
 
@@ -732,6 +1122,87 @@ class TestCaseGenerator {
         }
 
         return new GraphInstance(pre, convertToDouble(weights), n);
+    }
+
+    // Generate weighted undirected graph for Boruvka's algorithm
+    @SuppressWarnings("unchecked")
+    public List<BoruvkaAlgorithm.Edge>[] generateBoruvkaGraph(int n, double edgeProbability) {
+        List<BoruvkaAlgorithm.Edge>[] adjList = new ArrayList[n];
+        for (int i = 0; i < n; i++) {
+            adjList[i] = new ArrayList<>();
+        }
+        
+        // Generate random edges
+        for (int i = 0; i < n; i++) {
+            for (int j = i + 1; j < n; j++) {
+                if (random.nextDouble() < edgeProbability) {
+                    double weight = 1 + random.nextDouble() * 99; // weights between 1 and 100
+                    BoruvkaAlgorithm.Edge edge = new BoruvkaAlgorithm.Edge(i, j, weight);
+                    adjList[i].add(edge);
+                    adjList[j].add(edge);
+                }
+            }
+        }
+        
+        return adjList;
+    }
+    
+    // Generate connected weighted graph for Boruvka
+    @SuppressWarnings("unchecked")
+    public List<BoruvkaAlgorithm.Edge>[] generateConnectedBoruvkaGraph(int n) {
+        List<BoruvkaAlgorithm.Edge>[] adjList = new ArrayList[n];
+        for (int i = 0; i < n; i++) {
+            adjList[i] = new ArrayList<>();
+        }
+        
+        // First create a spanning tree to ensure connectivity
+        List<Integer> inTree = new ArrayList<>();
+        List<Integer> notInTree = new ArrayList<>();
+        
+        inTree.add(0);
+        for (int i = 1; i < n; i++) {
+            notInTree.add(i);
+        }
+        
+        // Add edges to create spanning tree
+        while (!notInTree.isEmpty()) {
+            int treeVertex = inTree.get(random.nextInt(inTree.size()));
+            int newVertex = notInTree.remove(random.nextInt(notInTree.size()));
+            
+            double weight = 1 + random.nextDouble() * 99;
+            BoruvkaAlgorithm.Edge edge = new BoruvkaAlgorithm.Edge(treeVertex, newVertex, weight);
+            adjList[treeVertex].add(edge);
+            adjList[newVertex].add(edge);
+            
+            inTree.add(newVertex);
+        }
+        
+        // Add some additional random edges
+        int additionalEdges = n / 2;
+        for (int k = 0; k < additionalEdges; k++) {
+            int i = random.nextInt(n);
+            int j = random.nextInt(n);
+            
+            if (i != j) {
+                // Check if edge already exists
+                boolean exists = false;
+                for (BoruvkaAlgorithm.Edge e : adjList[i]) {
+                    if ((e.u == i && e.v == j) || (e.u == j && e.v == i)) {
+                        exists = true;
+                        break;
+                    }
+                }
+                
+                if (!exists) {
+                    double weight = 1 + random.nextDouble() * 99;
+                    BoruvkaAlgorithm.Edge edge = new BoruvkaAlgorithm.Edge(i, j, weight);
+                    adjList[i].add(edge);
+                    adjList[j].add(edge);
+                }
+            }
+        }
+        
+        return adjList;
     }
 
     private double[][] convertToDouble(int[][] arr) {
