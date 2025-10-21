@@ -112,14 +112,14 @@ public class LatticeLinearPredicateFramework {
     }
 
     public static class LLPRunner {
-        private final int n;
-        private final int numPlatformThreads;
-        private final GlobalState G;
-        private final LLPAlgorithm algorithm;
-        private final ExecutorService executor;
-        private final AtomicBoolean running;
-        private final AtomicInteger activeThreads;
-        private final CountDownLatch initLatch;
+        private final int n; // Number of elements in global state
+        private final int numPlatformThreads; // Number of platform threads to use
+        private final GlobalState G; // Global state
+        private final LLPAlgorithm algorithm; // Algorithm for particular problem
+        private final ExecutorService executor; // Manages threads
+        private final AtomicBoolean running; // Flag for all platform threads to check state of algorithm
+        private final AtomicInteger activeThreads; // Counter for number of active threads
+        private final CountDownLatch initLatch; // Used 
 
         public LLPRunner(int n, LLPAlgorithm algorithm) {
             this(n, algorithm, Runtime.getRuntime().availableProcessors());
@@ -307,352 +307,189 @@ class StableMarriageAlgorithm extends ConvergenceCheckerLLPAlgorithm {
     }
 }
 
-class ScanAlgorithm extends ConvergenceCheckerLLPAlgorithm {
-    private final int[] A;
-    private final int[] S;
+class ReduceAlgorithm extends ConvergenceCheckerLLPAlgorithm {
 
-    public ScanAlgorithm(int[] A) {
+    private final int[] A;       // original input, length = n (power of two)
+    private final int n;         // length of A
+    private final int Ssize;     // n - 1
+    private static final int NEG_INF = Integer.MIN_VALUE / 4;
+
+    public ReduceAlgorithm(int[] A) {
         this.A = A;
-        int n = A.length;
-        this.S = new int[n];
-        
-        // Build S safely - only compute for valid indices
-        for (int i = 0; i < n; i++) {
-            int leftChild = 2 * i + 1;
-            int rightChild = 2 * i + 2;
-            S[i] = (leftChild < n ? A[leftChild] : 0) + 
-                   (rightChild < n ? A[rightChild] : 0);
-        }
+        this.n = A.length;
+        this.Ssize = n - 1;
     }
 
+    // LLPRunner will call this with n = Ssize
     @Override
-    public LatticeLinearPredicateFramework.GlobalState createGlobalState(int n) {
-        return new LatticeLinearPredicateFramework.IntArrayState(2 * n - 1);
+    public LatticeLinearPredicateFramework.GlobalState createGlobalState(int dummy) {
+        LatticeLinearPredicateFramework.IntArrayState S = new LatticeLinearPredicateFramework.IntArrayState(Ssize);
+        return S;
     }
 
     @Override
     public void init(LatticeLinearPredicateFramework.ThreadContext ctx) {
-        LatticeLinearPredicateFramework.IntArrayState state = 
-            (LatticeLinearPredicateFramework.IntArrayState) ctx.G;
-        state.set(ctx.j, Integer.MIN_VALUE);
+        LatticeLinearPredicateFramework.IntArrayState S = (LatticeLinearPredicateFramework.IntArrayState) ctx.G;
+        S.set(ctx.j, NEG_INF);
     }
 
     @Override
     public boolean forbidden(LatticeLinearPredicateFramework.ThreadContext ctx) {
-        LatticeLinearPredicateFramework.IntArrayState state = 
-            (LatticeLinearPredicateFramework.IntArrayState) ctx.G;
-        int j = ctx.j;
-        int Gj = state.get(j);
-        int n = A.length;
+        LatticeLinearPredicateFramework.IntArrayState S = (LatticeLinearPredicateFramework.IntArrayState) ctx.G;
+        int j0 = ctx.j;
+        int idx = j0 + 1;
+        int cur = S.get(j0);
+        if (cur != NEG_INF) return false;
 
-        // Check bounds before every array access
-        if (j == 1 && Gj < 0) return true;
-        
-        if (j % 2 == 0) {
-            int parentIndex = j / 2;
-            if (parentIndex < state.size() && Gj < state.get(parentIndex)) 
+        int half = n / 2;
+        if (1 <= idx && idx < half) {
+            // internal node: need both children S[2idx], S[2idx+1] to be ready
+            int c1 = 2 * idx;
+            int c2 = 2 * idx + 1;
+            int c1idx = c1 - 1;
+            int c2idx = c2 - 1;
+            // children exist inside S (they are always in range 1..n-1)
+            int v1 = S.get(c1idx);
+            int v2 = S.get(c2idx);
+            return (v1 != NEG_INF) && (v2 != NEG_INF);
+        } else {
+            return true;
+        }
+    }
+
+    @Override
+    public void advance(LatticeLinearPredicateFramework.ThreadContext ctx) {
+        LatticeLinearPredicateFramework.IntArrayState S = (LatticeLinearPredicateFramework.IntArrayState) ctx.G;
+        int j0 = ctx.j;
+        int idx = j0 + 1;
+        int half = n / 2;
+        int newVal;
+        if (1 <= idx && idx < half) {
+            // internal: S[idx] = S[2idx] + S[2idx+1]
+            int c1 = 2 * idx;
+            int c2 = 2 * idx + 1;
+            int c1idx = c1 - 1;
+            int c2idx = c2 - 1;
+            int v1 = S.get(c1idx);
+            int v2 = S.get(c2idx);
+            // if children not ready somebody else will skip, but forbidden ensured readiness
+            newVal = v1 + v2;
+        } else {
+            // leaf: S[idx] = A[2idx - n] + A[2idx - n + 1] (convert to 0-based)
+            int a1 = 2 * idx - n;
+            int a2 = 2 * idx - n + 1;
+            // safety bounds (should be valid for proper power-of-two n)
+            int va1 = A[a1];
+            int va2 = A[a2];
+            newVal = va1 + va2;
+        }
+        // Try to set S[j0] from NEG_INF to newVal (other thread may race)
+        S.compareAndSet(j0, NEG_INF, newVal);
+    }
+}
+
+
+/**
+ * LLP downward scan algorithm that computes G[1..2n-1] (1-based in paper).
+ * The last n positions G[n .. 2n-1] correspond to exclusive prefix sums.
+ * This algorithm reads S (from Reduce) and A; we pass S as a plain int[] snapshot to the constructor.
+ */
+class ScanDownAlgorithm extends ConvergenceCheckerLLPAlgorithm {
+
+    private final int[] A;         // input A[0..n-1]
+    private final int n;           // length of A (power of 2)
+    private final int Gsize;       // 2*n - 1
+    private final int[] Ssnapshot; // S snapshot produced by reduce (length n-1)
+    private static final int NEG_INF = Integer.MIN_VALUE / 4;
+
+    public ScanDownAlgorithm(int[] A, int[] Ssnapshot) {
+        this.A = A;
+        this.n = A.length;
+        this.Gsize = 2 * n - 1;
+        if (Ssnapshot.length != n - 1) {
+            throw new IllegalArgumentException("S snapshot length must be n-1");
+        }
+        this.Ssnapshot = Ssnapshot;
+    }
+
+    @Override
+    public LatticeLinearPredicateFramework.GlobalState createGlobalState(int dummy) {
+        // create an IntArrayState of size 2n - 1 for G array
+        LatticeLinearPredicateFramework.IntArrayState G = new LatticeLinearPredicateFramework.IntArrayState(Gsize);
+        return G;
+    }
+
+    @Override
+    public void init(LatticeLinearPredicateFramework.ThreadContext ctx) {
+        // initialize G[j] := -inf
+        LatticeLinearPredicateFramework.IntArrayState G = (LatticeLinearPredicateFramework.IntArrayState) ctx.G;
+        G.set(ctx.j, NEG_INF);
+    }
+
+    @Override
+    public boolean forbidden(LatticeLinearPredicateFramework.ThreadContext ctx) {
+        LatticeLinearPredicateFramework.IntArrayState G = (LatticeLinearPredicateFramework.IntArrayState) ctx.G;
+        int j0 = ctx.j;
+        int idx = j0 + 1;
+        int cur = G.get(j0);
+        if (cur != NEG_INF) return false;
+
+        if (idx == 1) {
+            return true;
+        }
+
+        int parent = idx / 2; // 1-based parent
+        int parent0 = parent - 1;
+        int parentVal = G.get(parent0);
+        if (parentVal == NEG_INF) return false; // need parent first
+
+        if ((idx % 2) == 0) {
+            // even (left child): G[idx] = G[parent]
+            return true;
+        } else {
+            // odd (right child)
+            if (idx < n) {
+                // internal right child: need S[idx-1] in 1-based S -> 0-based S index = idx-2
+                //int sidx = idx - 2;
                 return true;
-        }
-        
-        if (j % 2 == 1) {
-            int parentIndex = j / 2;
-            if (parentIndex < state.size()) {
-                if (j < n && j - 1 < S.length && Gj < S[j - 1] + state.get(parentIndex)) 
-                    return true;
-                if (j >= n && j - n < A.length && Gj < A[j - n] + state.get(parentIndex)) 
-                    return true;
+            } else {
+                return true;
             }
-        }
-
-        return false;
-    }
-
-    @Override
-    public void advance(LatticeLinearPredicateFramework.ThreadContext ctx) {
-        LatticeLinearPredicateFramework.IntArrayState state = 
-            (LatticeLinearPredicateFramework.IntArrayState) ctx.G;
-        int j = ctx.j;
-        int n = A.length;
-        int newValue = Integer.MIN_VALUE;
-
-        if (j == 1) newValue = Math.max(newValue, 0);
-        
-        if (j % 2 == 0) {
-            int parentIndex = j / 2;
-            if (parentIndex < state.size()) {
-                newValue = Math.max(newValue, state.get(parentIndex));
-            }
-        }
-        
-        if (j % 2 == 1) {
-            int parentIndex = j / 2;
-            if (parentIndex < state.size()) {
-                if (j < n && j - 1 < S.length) {
-                    newValue = Math.max(newValue, S[j - 1] + state.get(parentIndex));
-                }
-                if (j >= n && j - n < A.length) {
-                    newValue = Math.max(newValue, A[j - n] + state.get(parentIndex));
-                }
-            }
-        }
-
-        state.set(j, newValue);
-    }
-
-    @Override
-    protected boolean isLocallyConverged(LatticeLinearPredicateFramework.GlobalState G) {
-        for (int j = 0; j < G.size(); j++) {
-            LatticeLinearPredicateFramework.ThreadContext ctx = 
-                new LatticeLinearPredicateFramework.ThreadContext(j, G);
-            if (forbidden(ctx)) {
-                return false; // Found a forbidden state
-            }
-        }
-        return true; // No forbidden states found
-    }
-}
-
-
-class LLPReduce extends ConvergenceCheckerLLPAlgorithm {
-    private final int[] A;
-    private final int n_A; // This is 'n' from the pseudo-code
-
-    public LLPReduce(int[] A) {
-        this.A = A;
-        this.n_A = A.length;
-    }
-
-    @Override
-    public LatticeLinearPredicateFramework.GlobalState createGlobalState(int n) {
-        // n here is the size of the state G, which is n_A - 1
-        return new LatticeLinearPredicateFramework.IntArrayState(n);
-    }
-
-    @Override
-    public void init(LatticeLinearPredicateFramework.ThreadContext ctx) {
-        LatticeLinearPredicateFramework.IntArrayState G = (LatticeLinearPredicateFramework.IntArrayState) ctx.G;
-        G.set(ctx.j, Integer.MIN_VALUE); // -inf
-    }
-
-    @Override
-    public boolean forbidden(LatticeLinearPredicateFramework.ThreadContext ctx) {
-        LatticeLinearPredicateFramework.IntArrayState G = (LatticeLinearPredicateFramework.IntArrayState) ctx.G;
-        int j = ctx.j;       // 0-based Java index
-        int j_p = j + 1;   // 1-based pseudo-code index
-        int g_j = G.get(j);
-
-        // Clause 2: G[j] >= A[2j - n + 1] + A[2j - n + 2] if n/2 <= j < n
-        // These are the "leaf-parents" in the reduction tree.
-        if (j_p >= n_A / 2) {
-            // Convert pseudo-code A[k] to Java A[k-1]
-            int a_idx_1 = (2 * j_p - n_A + 1) - 1; // 2*j_p - n_A
-            int a_idx_2 = (2 * j_p - n_A + 2) - 1; // 2*j_p - n_A + 1
-            
-            // Check for potential overflow before adding
-            long sum = (long)A[a_idx_1] + A[a_idx_2];
-            if (sum > Integer.MAX_VALUE) {
-                 return g_j < Integer.MAX_VALUE; // or handle overflow appropriately
-            }
-            if (sum < Integer.MIN_VALUE) {
-                return g_j < Integer.MIN_VALUE;
-            }
-
-            return g_j < (int)sum;
-        }
-        // Clause 1: G[j] >= G[2j] + G[2j + 1] if 1 <= j < n/2
-        // These are the internal nodes.
-        else {
-            // Convert pseudo-code G[k] to Java G[k-1]
-            int left_child_j = (2 * j_p) - 1;
-            int right_child_j = (2 * j_p + 1) - 1; // 2 * j_p
-
-            int g_left = G.get(left_child_j);
-            int g_right = G.get(right_child_j);
-
-            // Dependency check: wait for children to be computed
-            if (g_left == Integer.MIN_VALUE || g_right == Integer.MIN_VALUE) {
-                return false; // Not forbidden, dependencies not met
-            }
-            
-            // Check for potential overflow
-            long sum = (long)g_left + g_right;
-            if (sum > Integer.MAX_VALUE) {
-                return g_j < Integer.MAX_VALUE;
-            }
-            if (sum < Integer.MIN_VALUE) {
-                return g_j < Integer.MIN_VALUE;
-            }
-
-            return g_j < (int)sum;
         }
     }
 
     @Override
     public void advance(LatticeLinearPredicateFramework.ThreadContext ctx) {
         LatticeLinearPredicateFramework.IntArrayState G = (LatticeLinearPredicateFramework.IntArrayState) ctx.G;
-        int j = ctx.j;
-        int j_p = j + 1;
-
-        // Clause 2 (Leaf-parents)
-        if (j_p >= n_A / 2) {
-            int a_idx_1 = 2 * j_p - n_A;
-            int a_idx_2 = 2 * j_p - n_A + 1;
-            
-            long sum = (long)A[a_idx_1] + A[a_idx_2];
-            int val = (int)Math.max(Integer.MIN_VALUE, Math.min(Integer.MAX_VALUE, sum));
-            G.set(j, val);
-        }
-        // Clause 1 (Internal nodes)
-        else {
-            int left_child_j = (2 * j_p) - 1;
-            int right_child_j = (2 * j_p);
-
-            int g_left = G.get(left_child_j);
-            int g_right = G.get(right_child_j);
-            
-            // This advance should only be called if forbidden was true,
-            // meaning children were not MIN_VALUE.
-            long sum = (long)g_left + g_right;
-            int val = (int)Math.max(Integer.MIN_VALUE, Math.min(Integer.MAX_VALUE, sum));
-            G.set(j, val);
-        }
-    }
-}
-
-class LLPScan extends ConvergenceCheckerLLPAlgorithm {
-    private final int[] A;
-    private final int[] S; // Summation tree from LLPReduce
-    private final int n_A; // This is 'n' from the pseudo-code
-
-    /**
-     * @param A The original input array (size n)
-     * @param S The summation tree from LLPReduce (size n-1)
-     */
-    public LLPScan(int[] A, int[] S) {
-        this.A = A;
-        this.S = S;
-        this.n_A = A.length;
-    }
-
-    @Override
-    public LatticeLinearPredicateFramework.GlobalState createGlobalState(int n) {
-        // n here is the size of state G, which is 2*n_A - 1
-        return new LatticeLinearPredicateFramework.IntArrayState(n);
-    }
-
-    @Override
-    public void init(LatticeLinearPredicateFramework.ThreadContext ctx) {
-        LatticeLinearPredicateFramework.IntArrayState G = (LatticeLinearPredicateFramework.IntArrayState) ctx.G;
-        G.set(ctx.j, Integer.MIN_VALUE); // -inf
-    }
-
-    @Override
-    public boolean forbidden(LatticeLinearPredicateFramework.ThreadContext ctx) {
-        LatticeLinearPredicateFramework.IntArrayState G = (LatticeLinearPredicateFramework.IntArrayState) ctx.G;
-        int j = ctx.j;       // 0-based Java index
-        int j_p = j + 1;   // 1-based pseudo-code index
-        int g_j = G.get(j);
-
-        // Clause 1: G[j] >= 0 if j = 1
-        if (j == 0) { // j_p == 1
-            return g_j < 0;
-        }
-
-        // Parent pseudo-index: j_p / 2
-        // Parent Java index: (j_p / 2) - 1  ==>  ((j + 1) / 2) - 1
-        int parent_j = ((j + 1) / 2) - 1;
-        int g_parent = G.get(parent_j);
-
-        if (g_parent == Integer.MIN_VALUE) {
-            return false;
-        }
-
-        // Clause 2: G[j] >= G[j/2] if j is even (Left child)
-        if (j_p % 2 == 0) { // j_p is even, so j is odd
-            return g_j < g_parent;
-        }
-        
-        // j_p must be odd (j is even)
-        
-        // Clause 3: G[j] >= S[j - 1] + G[j/2] if j is odd and j < n
-        if (j_p < n_A) { // Internal right child
-            // S_pseudo[k] -> S_java[k-1]
-            // We need S_pseudo[j_p - 1]
-            int s_idx = (j_p - 1) - 1; // j - 1
-            
-            // S array from LLPReduce might be shorter if n=1
-            if (s_idx < 0 || s_idx >= S.length) {
-                 // This case should ideally not be hit if j_p > 1 and j_p < n_A (implies n_A > 2)
-                 // But as a safeguard:
-                 return g_j < g_parent; // S[j-1] is effectively 0
-            }
-            
-            int s_val = S[s_idx];
-            
-            long sum = (long)s_val + g_parent;
-            if (sum > Integer.MAX_VALUE) return g_j < Integer.MAX_VALUE;
-            if (sum < Integer.MIN_VALUE) return g_j < Integer.MIN_VALUE;
-
-            return g_j < (int)sum;
-        }
-        // Clause 4: G[j] >= A[j - n] + G[j/2] if j is odd and j > n
-        else { // j_p >= n_A (Leaf node). Since j_p is odd, j_p > n_A (as n_A is power of 2)
-               // Note: pseudo-code says j > n, which is correct as n is even.
-            
-            // A_pseudo[k] -> A_java[k-1]
-            // We need A_pseudo[j_p - n_A]
-            int a_idx = (j_p - n_A) - 1; // (j+1 - n_A) - 1 = j - n_A
-            int a_val = A[a_idx];
-            
-            long sum = (long)a_val + g_parent;
-            if (sum > Integer.MAX_VALUE) return g_j < Integer.MAX_VALUE;
-            if (sum < Integer.MIN_VALUE) return g_j < Integer.MIN_VALUE;
-
-            return g_j < (int)sum;
-        }
-    }
-
-    @Override
-    public void advance(LatticeLinearPredicateFramework.ThreadContext ctx) {
-        LatticeLinearPredicateFramework.IntArrayState G = (LatticeLinearPredicateFramework.IntArrayState) ctx.G;
-        int j = ctx.j;
-        int j_p = j + 1;
-
-        // Clause 1
-        if (j == 0) {
-            G.set(0, 0);
+        int j0 = ctx.j;
+        int idx = j0 + 1;
+        if (idx == 1) {
+            G.compareAndSet(j0, NEG_INF, 0); // root = 0
             return;
         }
-
-        // Parent value (must be computed if forbidden was true)
-        int parent_j = ((j + 1) / 2) - 1;
-        int g_parent = G.get(parent_j);
-
-        // Clause 2 (Left child)
-        if (j_p % 2 == 0) {
-            G.set(j, g_parent);
+        int parent = idx / 2;
+        int parent0 = parent - 1;
+        int parentVal = G.get(parent0);
+        if ((idx % 2) == 0) {
+            // left child: copy parent
+            G.compareAndSet(j0, NEG_INF, parentVal);
             return;
-        }
-
-        // j_p must be odd (j is even)
-
-        // Clause 3 (Internal right child)
-        if (j_p < n_A) {
-            int s_idx = j - 1; // (j_p - 1) - 1
-            int s_val = S[s_idx];
-            
-            long sum = (long)s_val + g_parent;
-            int val = (int)Math.max(Integer.MIN_VALUE, Math.min(Integer.MAX_VALUE, sum));
-            G.set(j, val);
-        }
-        // Clause 4 (Leaf right child)
-        else {
-            int a_idx = j - n_A; // (j_p - n_A) - 1
-            int a_val = A[a_idx];
-            
-            long sum = (long)a_val + g_parent;
-            int val = (int)Math.max(Integer.MIN_VALUE, Math.min(Integer.MAX_VALUE, sum));
-            G.set(j, val);
+        } else {
+            // right child
+            int newVal;
+            if (idx < n) {
+                // internal right child: G[idx] = parentVal + S[idx - 1]
+                int sIdx0 = idx - 2; // S[j-1]
+                int sVal = Ssnapshot[sIdx0];
+                newVal = parentVal + sVal;
+            } else {
+                // last level right child: G[idx] = parentVal + A[idx - n]
+                int aIdx0 = idx - n;
+                int aVal = A[aIdx0];
+                newVal = parentVal + aVal;
+            }
+            G.compareAndSet(j0, NEG_INF, newVal);
+            return;
         }
     }
 }
@@ -1342,14 +1179,15 @@ class LLPBenchmark {
     }
 
     public void runScanBenchmark(int n, int numThreads, long timeoutSeconds) {
+
         System.out.println("\n=== Benchmarking Scan (n=" + n + ", threads=" + numThreads + ") ===");
-        
+
         String runId = String.format("scan_n%d_t%d_r%d", n, numThreads, runCounter++);
         String inputFile = outputDir + "/" + runId + "_input.txt";
         String outputFile = outputDir + "/" + runId + "_output.txt";
-        
+
         int[] A = generator.generateScanInput(n);
-        
+
         // Write input to file
         try (java.io.PrintWriter writer = new java.io.PrintWriter(inputFile)) {
             writer.println("Scan Problem");
@@ -1363,47 +1201,66 @@ class LLPBenchmark {
         } catch (Exception e) {
             System.err.println("Error writing input file: " + e.getMessage());
         }
-        
-        ScanAlgorithm algo = new ScanAlgorithm(A);
-        
+
+        // Phase 1: LLP-Reduce -> compute S[1..n-1]
+        ReduceAlgorithm reduceAlgo = new ReduceAlgorithm(A);
         long startTime = System.currentTimeMillis();
-        LatticeLinearPredicateFramework.LLPRunner runner = 
-            new LatticeLinearPredicateFramework.LLPRunner(2 * n - 1, algo, numThreads);
-        runner.start();
-        
-        boolean converged = false;
+        LatticeLinearPredicateFramework.LLPRunner reduceRunner =
+            new LatticeLinearPredicateFramework.LLPRunner(n - 1, reduceAlgo, numThreads);
+        reduceRunner.start();
+        boolean reduced = false;
         try {
-            converged = runner.awaitConvergence(timeoutSeconds, TimeUnit.SECONDS);
+            reduced = reduceRunner.awaitConvergence(timeoutSeconds, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
-        
-        runner.stop();
+        reduceRunner.stop();
+
+        // extract S snapshot
+        LatticeLinearPredicateFramework.IntArrayState Sstate =
+            (LatticeLinearPredicateFramework.IntArrayState) reduceRunner.getGlobalState();
+        int[] Ssnapshot = Sstate.snapshot(); // length n-1
+
+        // Phase 2: LLP-Scan downward using Ssnapshot -> compute G[1..2n-1]
+        ScanDownAlgorithm scanAlgo = new ScanDownAlgorithm(A, Ssnapshot);
+        LatticeLinearPredicateFramework.LLPRunner scanRunner =
+            new LatticeLinearPredicateFramework.LLPRunner(2 * n - 1, scanAlgo, numThreads);
+        scanRunner.start();
+        boolean scanned = false;
+        try {
+            scanned = scanRunner.awaitConvergence(timeoutSeconds, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        scanRunner.stop();
+
         long executionTime = System.currentTimeMillis() - startTime;
-        
+
         // Write output to file
         try (java.io.PrintWriter writer = new java.io.PrintWriter(outputFile)) {
             writer.println("Scan Results");
             writer.println("Execution Time: " + executionTime + " ms");
-            writer.println("Converged: " + converged);
+            writer.println("Reduced (S) Converged: " + reduced);
+            writer.println("Downward Scan (G) Converged: " + scanned);
             writer.println("Threads: " + numThreads);
             writer.println("\nPrefix Sums:");
-            
-            LatticeLinearPredicateFramework.IntArrayState state = 
-                (LatticeLinearPredicateFramework.IntArrayState) runner.getGlobalState();
-            int[] finalState = state.snapshot();
+
+            LatticeLinearPredicateFramework.IntArrayState Gstate =
+                (LatticeLinearPredicateFramework.IntArrayState) scanRunner.getGlobalState();
+            int[] finalG = Gstate.snapshot(); // length 2n - 1
             for (int i = n; i < 2 * n - 1; i++) {
-                writer.println("Position " + (i - n) + ": " + finalState[i]);
+                writer.println("Position " + (i - n) + ": " + finalG[i]);
             }
         } catch (Exception e) {
             System.err.println("Error writing output file: " + e.getMessage());
         }
-        
+
         BenchmarkResult result = new BenchmarkResult(
-            "Scan", n, numThreads, executionTime, converged, inputFile, outputFile);
+            "Scan", n, numThreads, executionTime, scanned, inputFile, outputFile);
         results.add(result);
         System.out.println(result);
     }
+
 
     public void runComponentsBenchmark(int n, double edgeProb, int numThreads, long timeoutSeconds) {
         System.out.println("\n=== Benchmarking Connected Components (n=" + n + ", threads=" + numThreads + ") ===");
@@ -1764,22 +1621,22 @@ class LLPBenchmark {
         long timeout = 60; // seconds
 
         // Stable Marriage Benchmarks
-        //System.out.println("\n" + "=".repeat(80));
-        //System.out.println("STABLE MARRIAGE BENCHMARKS");
-        //System.out.println("=".repeat(80));
-        //for (int size : sizes) {
-        //    for (int threads : threadCounts) {
-        //        if (threads <= size) {
-        //            runStableMarriageBenchmark(size, threads, timeout);
-        //        }
-        //    }
-        //}
+        System.out.println("\n" + "=".repeat(80));
+        System.out.println("STABLE MARRIAGE BENCHMARKS");
+        System.out.println("=".repeat(80));
+        for (int size : sizes) {
+            for (int threads : threadCounts) {
+                if (threads <= size) {
+                    runStableMarriageBenchmark(size, threads, timeout);
+                }
+            }
+        }
 
         // Scan Benchmarks (use powers of 2)
         System.out.println("\n" + "=".repeat(80));
         System.out.println("SCAN BENCHMARKS");
         System.out.println("=".repeat(80));
-        int[] scanSizes = {16, 64, 1024, 4096, 8192};
+        int[] scanSizes = {16, 64, 1024, 4096, 8192, 1048576};
         for (int size : scanSizes) {
             for (int threads : threadCounts) {
                 runScanBenchmark(size, threads, timeout);
@@ -1787,52 +1644,52 @@ class LLPBenchmark {
         }
 
         // Connected Components Benchmarks
-        //System.out.println("\n" + "=".repeat(80));
-        //System.out.println("CONNECTED COMPONENTS BENCHMARKS");
-        //System.out.println("=".repeat(80));
-        //for (int size : sizes) {
-        //    for (int threads : threadCounts) {
-        //        if (threads <= size) {
-        //            runComponentsBenchmark(size, 0.1, threads, timeout);
-        //        }
-        //    }
-        //}
+        System.out.println("\n" + "=".repeat(80));
+        System.out.println("CONNECTED COMPONENTS BENCHMARKS");
+        System.out.println("=".repeat(80));
+        for (int size : sizes) {
+            for (int threads : threadCounts) {
+                if (threads <= size) {
+                    runComponentsBenchmark(size, 0.1, threads, timeout);
+                }
+            }
+        }
 
         // Bellman-Ford Benchmarks
-        //System.out.println("\n" + "=".repeat(80));
-        //System.out.println("BELLMAN-FORD BENCHMARKS");
-        //System.out.println("=".repeat(80));
-        //for (int size : sizes) {
-        //    for (int threads : threadCounts) {
-        //        if (threads <= size) {
-        //            runBellmanFordBenchmark(size, 4, threads, timeout);
-        //        }
-        //    }
-        //}
+        System.out.println("\n" + "=".repeat(80));
+        System.out.println("BELLMAN-FORD BENCHMARKS");
+        System.out.println("=".repeat(80));
+        for (int size : sizes) {
+            for (int threads : threadCounts) {
+                if (threads <= size) {
+                    runBellmanFordBenchmark(size, 4, threads, timeout);
+                }
+            }
+        }
 
         // Johnson Benchmarks
-        //System.out.println("\n" + "=".repeat(80));
-        //System.out.println("JOHNSON BENCHMARKS");
-        //System.out.println("=".repeat(80));
-        //for (int size : sizes) {
-        //    for (int threads : threadCounts) {
-        //        if (threads <= size) {
-        //            runJohnsonBenchmark(size, 4, threads, timeout);
-        //        }
-        //    }
-        //}
+        System.out.println("\n" + "=".repeat(80));
+        System.out.println("JOHNSON BENCHMARKS");
+        System.out.println("=".repeat(80));
+        for (int size : sizes) {
+            for (int threads : threadCounts) {
+                if (threads <= size) {
+                    runJohnsonBenchmark(size, 4, threads, timeout);
+                }
+            }
+        }
 
         // Boruvka Benchmarks
-        //System.out.println("\n" + "=".repeat(80));
-        //System.out.println("BORUVKA MSF BENCHMARKS");
-        //System.out.println("=".repeat(80));
-        //for (int size : sizes) {
-        //    for (int threads : threadCounts) {
-        //        if (threads <= size) {
-        //            runBoruvkaBenchmark(size, 0.2, threads, timeout);
-        //        }
-        //    }
-        //}
+        System.out.println("\n" + "=".repeat(80));
+        System.out.println("BORUVKA MSF BENCHMARKS");
+        System.out.println("=".repeat(80));
+        for (int size : sizes) {
+            for (int threads : threadCounts) {
+                if (threads <= size) {
+                    runBoruvkaBenchmark(size, 0.2, threads, timeout);
+                }
+            }
+        }
 
         printSummary();
     }
